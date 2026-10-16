@@ -47,7 +47,7 @@ func quotaError(status int, body string) bool {
 		return true
 	}
 	body = strings.ToLower(body)
-	for _, marker := range []string{"insufficient_quota", "quota_exceeded", "quota exceeded", "quota exhausted", "rate_limit", "rate limit", "rate-limit", "usage_limit", "usage limit", "insufficient balance", "credit balance is too low", "额度不足", "配额已用尽"} {
+	for _, marker := range []string{"insufficient_quota", "quota_exceeded", "resource_exhausted", "quota exceeded", "quota exhausted", "rate_limit", "rate limit", "rate-limit", "usage_limit", "usage limit", "insufficient balance", "credit balance is too low", "额度不足", "配额已用尽"} {
 		if strings.Contains(body, marker) {
 			return true
 		}
@@ -198,7 +198,7 @@ func (g *Gateway) rotationAttempt(parent context.Context, w http.ResponseWriter,
 		result.err = errors.New("no proxy")
 		return result
 	}
-	req, err := newUpstreamRequest(ctx, g.cfg.Upstream.Go, route.Protocol, body, ids, node.key)
+	req, err := newUpstreamRequest(ctx, g.cfg.Upstream.Go, route.Protocol, route.ID, body, ids, node.key)
 	if err != nil {
 		result.err = err
 		return result
@@ -294,7 +294,7 @@ func (g *Gateway) rotationAttempt(parent context.Context, w http.ResponseWriter,
 		result.reason = "first_output_timeout"
 		return result
 	}
-	if shaped {
+	if shaped || wire.StreamOnly(route.Protocol) {
 		b, err = wire.CollapseStream(bytes.NewReader(b), route.Protocol, route.ID)
 	}
 	var document map[string]any
@@ -317,6 +317,8 @@ func (g *Gateway) rotationAttempt(parent context.Context, w http.ResponseWriter,
 			_, valid = document["content"].([]any)
 		case wire.Responses:
 			_, valid = document["output"].([]any)
+		case wire.Google:
+			_, valid = document["candidates"].([]any)
 		}
 		if !valid {
 			err = errors.New("invalid response schema")

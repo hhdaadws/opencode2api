@@ -76,6 +76,11 @@ func ForcedEffort(protocol Protocol, body map[string]any, effort string) {
 			body["reasoning"] = reasoning
 		}
 		reasoning["effort"] = effort
+	case Google:
+		if clientEffortExplicit(protocol, body) {
+			return
+		}
+		applyGoogleForcedEffort(body, effort, disable)
 	}
 }
 
@@ -84,9 +89,10 @@ func ForcedEffort(protocol Protocol, body map[string]any, effort string) {
 //
 // The shapes differ per protocol, and each one mirrors how that protocol
 // expressed the level natively: Anthropic states it in output_config.effort (or
-// a top-level effort), Chat in a bare reasoning_effort string, and Responses in
-// reasoning.effort. Anything else in those slots is a structural value the
-// conversion produced, which a forced level is allowed to replace.
+// a top-level effort), Chat in a bare reasoning_effort string, Responses in
+// reasoning.effort, and Gemini in generationConfig.thinkingConfig.thinkingLevel.
+// Anything else in those slots is a structural value the conversion produced,
+// which a forced level is allowed to replace.
 func clientEffortExplicit(protocol Protocol, body map[string]any) bool {
 	switch protocol {
 	case Chat:
@@ -100,6 +106,9 @@ func clientEffortExplicit(protocol Protocol, body map[string]any) bool {
 		return ok && strings.TrimSpace(effort) != ""
 	case Responses:
 		_, ok := jsonutil.AnyAt(body, "reasoning", "effort").(string)
+		return ok
+	case Google:
+		_, ok := jsonutil.AnyAt(body, "generationConfig", "thinkingConfig", "thinkingLevel").(string)
 		return ok
 	default:
 		return false
@@ -622,6 +631,8 @@ func encodeBridgeRequest(protocol Protocol, request bridgeRequest) (map[string]a
 		return encodeResponsesRequest(request), nil
 	case Anthropic:
 		return encodeAnthropicRequest(request), nil
+	case Google:
+		return encodeGoogleRequest(request)
 	default:
 		return nil, fmt.Errorf("unsupported output protocol %q", protocol)
 	}

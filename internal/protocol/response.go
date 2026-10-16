@@ -134,6 +134,10 @@ func decodeBridgeResponse(protocol Protocol, input map[string]any) (bridgeRespon
 		}
 		response.Stop = canonicalAnthropicStop(jsonutil.StringAt(input, "stop_reason"))
 		response.Usage = decodeAnthropicUsage(jsonutil.MapAt(input, "usage"))
+	case Google:
+		if err := decodeGoogleResponse(input, &response); err != nil {
+			return response, err
+		}
 	default:
 		return response, fmt.Errorf("unsupported response protocol %q", protocol)
 	}
@@ -271,6 +275,8 @@ func encodeBridgeResponse(protocol Protocol, response bridgeResponse) map[string
 			"stop_sequence": nil,
 			"usage":         anthropicUsage(response.Usage),
 		}
+	case Google:
+		return encodeGoogleResponse(response)
 	default:
 		return map[string]any{}
 	}
@@ -445,6 +451,10 @@ func ResponseUsage(protocol Protocol, body []byte) (Usage, bool) {
 	var payload map[string]any
 	if json.Unmarshal(body, &payload) != nil {
 		return Usage{}, false
+	}
+	if protocol == Google {
+		usage := jsonutil.MapAt(payload, "usageMetadata")
+		return decodeGoogleUsage(usage), googleUsageReported(usage)
 	}
 	usage := jsonutil.MapAt(payload, "usage")
 	if len(usage) == 0 {

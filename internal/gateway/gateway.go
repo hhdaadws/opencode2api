@@ -295,12 +295,13 @@ func (g *Gateway) handleInference(external wire.Protocol) http.HandlerFunc {
 			wire.WriteError(w, external, http.StatusBadGateway, "failed to read upstream response", "upstream_error", ids.Request)
 			return
 		}
-		if upstreamRoute.Anonymous || (meta != nil && meta.Shaped) {
+		if upstreamRoute.Anonymous || (meta != nil && meta.Shaped) || wire.StreamOnly(upstreamRoute.Protocol) {
 			// Key-tier shaped requests were force-streamed like the
 			// anonymous lane; collapse the same way.
 			// The anonymous lane is served streaming (see prepareAnonymousBody);
 			// collapse the events back into the single document this
-			// non-streaming client asked for.
+			// non-streaming client asked for. A stream-only upstream (Gemini)
+			// is always called streaming and is collapsed the same way.
 			collapsed, err := wire.CollapseStream(bytes.NewReader(responseBody), upstreamRoute.Protocol, model)
 			if err != nil {
 				g.logger.Warn("anonymous stream collapse failed", "component", "conversion", "event", "anonymous_collapse_failed", "request_id", ids.Request, "model", model, "source_protocol", upstreamRoute.Protocol, "error", err)
@@ -487,8 +488,15 @@ func (g *Gateway) prepareRouteBodies(from wire.Protocol, route models.Route, inp
 			}
 			return nil, fmt.Errorf("prepare %s upstream request: %w", tier, err)
 		}
-		if effort := g.resolvedEffort(jsonutil.StringAt(upstreamPayload, "model"), tier, protocol); effort != "" {
+		// The client's model, not the upstream body's: a Gemini body carries
+		// its model in the URL.
+		model := jsonutil.StringAt(input, "model")
+		if effort := g.resolvedEffort(model, tier, protocol); effort != "" {
 			wire.ForcedEffort(protocol, upstreamPayload, effort)
+		}
+		if protocol == wire.Google {
+			metadata := g.catalog.MetadataForTier(model, tier)
+			wire.FitGoogleRequest(upstreamPayload, metadata.ReasoningEfforts, metadata.Temperature != nil && !*metadata.Temperature)
 		}
 		encoded, err := json.Marshal(upstreamPayload)
 		if err != nil {

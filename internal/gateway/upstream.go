@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"sort"
 	"strconv"
 	"strings"
@@ -298,7 +299,7 @@ func (g *Gateway) doAnonymousUpstream(ctx context.Context, route models.Route, b
 			httpx.DrainAndClose(lastResponse.Body)
 			lastResponse = nil
 		}
-		req, err := newUpstreamRequest(ctx, g.cfg.Upstream.Anonymous, route.Protocol, body, ids, anonymousZenKey)
+		req, err := newUpstreamRequest(ctx, g.cfg.Upstream.Anonymous, route.Protocol, route.ID, body, ids, anonymousZenKey)
 		if err != nil {
 			return nil, err, attempts
 		}
@@ -394,7 +395,8 @@ func knownOpencodeTool(name string) (opencodeToolDefinition, bool) {
 // definitions. Bodies that already satisfy all of that (or are not JSON
 // objects) are returned unchanged. System One payloads are decision requests,
 // not agent traffic, so they are forwarded verbatim; injecting streaming or
-// tool definitions would make the upstream reject them.
+// tool definitions would make the upstream reject them. A Gemini body has no
+// stream field: its path already pins streaming.
 func prepareAnonymousBody(body []byte, protocol wire.Protocol) []byte {
 	if protocol == wire.SystemOne {
 		return body
@@ -404,7 +406,7 @@ func prepareAnonymousBody(body []byte, protocol wire.Protocol) []byte {
 		return body
 	}
 	changed := false
-	if streaming, ok := payload["stream"].(bool); !ok || !streaming {
+	if streaming, ok := payload["stream"].(bool); !wire.StreamOnly(protocol) && (!ok || !streaming) {
 		payload["stream"] = true
 		changed = true
 	}
@@ -450,6 +452,9 @@ func ensureAnonymousChatUsage(payload map[string]any, protocol wire.Protocol) bo
 // names upstream does not recognise are left exactly as the client declared
 // them, so downstream function calling keeps working.
 func ensureAnonymousTools(payload map[string]any, protocol wire.Protocol) bool {
+	if protocol == wire.Google {
+		return ensureAnonymousGoogleTools(payload)
+	}
 	raw, exists := payload["tools"]
 	if !exists {
 		payload["tools"] = anonymousToolset(protocol, nil)
@@ -490,6 +495,53 @@ func ensureAnonymousTools(payload map[string]any, protocol wire.Protocol) bool {
 	}
 	payload["tools"] = items
 	return true
+}
+
+// ensureAnonymousGoogleTools is ensureAnonymousTools for a Gemini body, whose
+// tools are function declarations nested inside one tool entry.
+func ensureAnonymousGoogleTools(payload map[string]any) bool {
+	tools, ok := payload["tools"].([]any)
+	if !ok && payload["tools"] != nil {
+		return false
+	}
+	var entry map[string]any
+	for _, raw := range tools {
+		if candidate, ok := raw.(map[string]any); ok && candidate["functionDeclarations"] != nil {
+			entry = candidate
+			break
+		}
+	}
+	changed := false
+	if entry == nil {
+		entry = map[string]any{"functionDeclarations": []any{}}
+		payload["tools"] = append(tools, entry)
+		changed = true
+	}
+	declarations, ok := entry["functionDeclarations"].([]any)
+	if !ok {
+		return changed
+	}
+	present := make(map[string]bool, len(declarations))
+	for index, raw := range declarations {
+		declaration, _ := raw.(map[string]any)
+		name := jsonutil.StringAt(declaration, "name")
+		if name == "" {
+			continue
+		}
+		present[name] = true
+		if _, known := knownOpencodeTool(name); known {
+			declarations[index] = anonymousTool(wire.Google, name)
+			changed = true
+		}
+	}
+	for _, name := range anonymousCoreTools {
+		if !present[name] {
+			declarations = append(declarations, anonymousTool(wire.Google, name))
+			changed = true
+		}
+	}
+	entry["functionDeclarations"] = declarations
+	return changed
 }
 
 func anonymousToolName(protocol wire.Protocol, item any) string {
@@ -546,6 +598,12 @@ func anonymousTool(protocol wire.Protocol, name string) map[string]any {
 			"name":         name,
 			"description":  description,
 			"input_schema": parameters,
+		}
+	case wire.Google:
+		return map[string]any{
+			"name":                 name,
+			"description":          description,
+			"parametersJsonSchema": parameters,
 		}
 	default:
 		return map[string]any{
@@ -648,7 +706,7 @@ func (g *Gateway) doSelectedKeyUpstream(ctx context.Context, route models.Route,
 	}
 	keyID := config.KeyDisplayID(node.key)
 	setRequestCredential(ctx, override.Tier, keyID, "key", false, proxy)
-	req, err := newUpstreamRequest(ctx, baseURL, route.ProtocolFor(override.Tier), body, ids, node.key)
+	req, err := newUpstreamRequest(ctx, baseURL, route.ProtocolFor(override.Tier), route.ID, body, ids, node.key)
 	if err != nil {
 		return nil, err, 0
 	}
@@ -710,7 +768,7 @@ func (g *Gateway) doKeyUpstream(ctx context.Context, route models.Route, bodies 
 			httpx.DrainAndClose(lastResponse.Body)
 			lastResponse = nil
 		}
-		req, err := newUpstreamRequest(ctx, baseURL, route.Protocol, body, ids, node.key)
+		req, err := newUpstreamRequest(ctx, baseURL, route.Protocol, route.ID, body, ids, node.key)
 		if err != nil {
 			return nil, err, attempts
 		}
@@ -867,8 +925,12 @@ func (g *Gateway) recordUpstreamAttempt(ctx context.Context, route models.Route,
 	})
 }
 
-func newUpstreamRequest(ctx context.Context, baseURL string, protocol wire.Protocol, body []byte, ids identity.RequestIDs, key string) (*http.Request, error) {
-	endpoint := strings.TrimRight(baseURL, "/") + wire.Path(protocol)
+func newUpstreamRequest(ctx context.Context, baseURL string, protocol wire.Protocol, model string, body []byte, ids identity.RequestIDs, key string) (*http.Request, error) {
+	baseURL = strings.TrimRight(baseURL, "/")
+	if protocol == wire.Google {
+		baseURL = googleUpstreamBase(baseURL)
+	}
+	endpoint := baseURL + wire.UpstreamPath(protocol, model)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
 	if err != nil {
 		return nil, err
@@ -898,17 +960,43 @@ func newUpstreamRequest(ctx context.Context, baseURL string, protocol wire.Proto
 	if ids.ParentSession != "" {
 		req.Header.Set("x-parent-session-id", ids.ParentSession)
 	}
-	if protocol == wire.Anthropic {
+	switch protocol {
+	case wire.Anthropic:
 		req.Header.Set("x-api-key", key)
 		req.Header.Set("anthropic-version", "2023-06-01")
 		req.Header.Set("anthropic-beta", "interleaved-thinking-2025-05-14,fine-grained-tool-streaming-2025-05-14")
-	} else {
+	case wire.Google:
+		// The console reads a Gemini credential only from x-goog-api-key, while
+		// the inference backend also accepts the bearer form the other
+		// protocols use, so both carry the key.
+		req.Header.Set("x-goog-api-key", key)
+		req.Header.Set("Authorization", "Bearer "+key)
+	default:
 		// The anonymous credential is the literal token "public". The 2026-10-14
 		// gate rejects keyless requests (an absent header used to pass) and is
 		// case-sensitive: "Bearer PUBLIC" 401s.
 		req.Header.Set("Authorization", "Bearer "+key)
 	}
 	return req, nil
+}
+
+// googleUpstreamBase returns the base URL that serves Gemini requests. The
+// legacy console routes Gemini traffic only for Zen (/zen/v1/models/...); Go's
+// Gemini models are served by the inference backend directly, so the console's
+// /zen/go base is swapped for /inference/go. The console has no Gemini route
+// for Go at all, so the rewrite cannot break a working setup; every other base
+// is used as configured.
+func googleUpstreamBase(baseURL string) string {
+	parsed, err := url.Parse(baseURL)
+	if err != nil {
+		return baseURL
+	}
+	trimmed, ok := strings.CutSuffix(parsed.Path, "/zen/go")
+	if !ok {
+		return baseURL
+	}
+	parsed.Path = trimmed + "/inference/go"
+	return parsed.String()
 }
 
 // clientProjectID renders the project header the way the client does: a bare

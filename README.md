@@ -2,7 +2,7 @@
 
 [English](README.md) | [简体中文](README.zh-CN.md)
 
-A Go gateway for **OpenCode Zen and Zen Go**. It exposes Chat Completions, Responses, and Anthropic Messages endpoints, translates between their native protocols, and manages upstream keys and proxies.
+A Go gateway for **OpenCode Zen and Zen Go**. It exposes Chat Completions, Responses, and Anthropic Messages endpoints, translates between their native protocols (including the Gemini `generateContent` format that Gemini models use upstream), and manages upstream keys and proxies.
 
 The executable includes the WebUI. Running the service requires no Node.js runtime or database.
 
@@ -173,6 +173,14 @@ System One pairs a free-form state with typed questions and returns typed answer
 
 Requests using the upstream's native protocol retain provider-specific fields. Requests crossing protocols pass through a common representation; not every option has an equivalent. For example, Chat JSON output constraints and `seed` are not forwarded to Anthropic Messages. Unsupported content or tool types may be rejected.
 
+Gemini models (native protocol `google`) are served through all three endpoints; there is no Gemini-format endpoint for clients. Specifics:
+
+- The upstream is always called with `streamGenerateContent`, as OpenCode's own client does; a non-streaming request is answered by collapsing that stream. Go-tier Gemini traffic goes to the inference backend (`…/inference/go`), because the legacy `/zen/go` console has no Gemini route.
+- Gemini 3 requires each function call's thought signature to be sent back with the history. The gateway appends it to the tool call ID it returns (`<id>__thought__<signature>`), so clients must return tool call IDs unchanged. A call without a signature, such as one made earlier by another model, is replayed with Google's documented skip sentinel. Thought summaries are shown but not replayed.
+- Thinking levels map onto Gemini's `minimal`/`low`/`medium`/`high` (`xhigh` and `max` become `high`) and are moved to the nearest level the catalog lists for the model. The temperature is dropped for models the catalog marks as not accepting one.
+- Gemini does not fetch remote URLs: images and files must be sent as base64 data, and OpenAI file IDs cannot be forwarded.
+- A response that Gemini splits across requests (`CONTINUATION`) is not resumed and is reported as cut short, like an output cap.
+
 The gateway exposes the routes listed above. It does not implement embeddings, file uploads, image generation, or Responses retrieval and cancellation. It does not store conversation history; clients must supply the history or use features supported by the actual upstream.
 
 ## Routing and models
@@ -194,7 +202,7 @@ The gateway refreshes Zen/Go `/v1/models` and OpenCode's [capability catalog](ht
 }
 ```
 
-Allowed protocol values are `chat`, `responses`, and `anthropic`. Models using unsupported native protocols are filtered from discovery unless overridden.
+Allowed protocol values are `chat`, `responses`, `anthropic`, `systemone`, and `google`. Models using unsupported native protocols are filtered from discovery unless overridden.
 
 Cost, deprecation, and model limits come from the official [OpenCode metadata endpoint](https://models.opencode.ai/api.json), refreshed every 24 hours. OpenCode's capability catalog remains authoritative for context and token limits; metadata `limit.context`, `limit.input`, and `limit.output` fill fields missing from that catalog. These limits are exposed by `/v1/models` as `context_window`/`context_length`, `max_input`, and `max_output` for discovery clients such as CLIProxyAPI and Pi. Metadata requests use a 30-second timeout per HTTP client. Refresh failures retain existing data.
 
