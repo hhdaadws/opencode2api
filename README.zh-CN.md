@@ -2,7 +2,7 @@
 
 [English](README.md) | [简体中文](README.zh-CN.md)
 
-使用 Go 编写的 **OpenCode Zen / Zen Go API 网关**。对外提供 Chat Completions、Responses 和 Anthropic Messages 接口，按上游原生协议转换请求，并统一管理上游 Key 与代理。
+使用 Go 编写的 **OpenCode Zen / Zen Go API 网关**。对外提供 Chat Completions、Responses 和 Anthropic Messages 接口，按上游原生协议（包括 Gemini 模型在上游使用的 `generateContent` 格式）转换请求，并统一管理上游 Key 与代理。
 
 WebUI 内嵌在可执行文件中，运行服务无需 Node.js 或数据库。
 
@@ -173,6 +173,14 @@ System One 将自由文本状态与类型化问题配对，并返回类型化答
 
 客户端协议与上游原生协议相同时，会保留供应商特有字段。跨协议请求经过统一中间结构转换，部分参数没有等价表达。例如，Chat 的 JSON 输出约束与 `seed` 不会被转发到 Anthropic Messages。不支持的内容块或工具类型可能被拒绝。
 
+Gemini 模型（原生协议 `google`）可通过上述三种接口调用；网关不对客户端提供 Gemini 格式的接口。具体说明：
+
+- 与 OpenCode 官方客户端一致，上游固定以 `streamGenerateContent` 流式调用；非流式请求由网关把上游流合并为单个响应返回。Go 层的 Gemini 请求直接发往推理后端（`…/inference/go`），因为旧版 `/zen/go` 控制台没有 Gemini 路由。
+- Gemini 3 要求在历史中回传每个函数调用的思考签名（thought signature）。网关把签名附在返回给客户端的工具调用 ID 后面（`<id>__thought__<签名>`），因此客户端必须原样回传工具调用 ID。没有签名的调用（例如之前由其他模型发起的调用）会使用 Google 文档规定的跳过校验标记回放。思考摘要会展示给客户端，但不会回放给上游。
+- 思考档位映射到 Gemini 的 `minimal`/`low`/`medium`/`high`（`xhigh`、`max` 视为 `high`），并调整为能力目录中该模型支持的最近档位。能力目录标明不接受 temperature 的模型会去掉该参数。
+- Gemini 不会抓取远程 URL：图片和文件必须以 base64 数据发送，OpenAI 的 file ID 无法转发。
+- Gemini 跨多个请求拆分的长响应（`CONTINUATION`）不会续传，按输出被截断处理，与达到输出上限相同。
+
 网关仅实现上表中的接口，不提供 embeddings、文件上传、图像生成、Responses 查询或取消接口。网关不保存会话历史；客户端需要提交历史，或使用实际上游支持的相关能力。
 
 ## 路由与模型
@@ -194,7 +202,7 @@ System One 将自由文本状态与类型化问题配对，并返回类型化答
 }
 ```
 
-协议值仅允许 `chat`、`responses`、`anthropic`。使用不支持的原生协议的模型会从模型列表中隐藏，除非配置了覆盖值。
+协议值可为 `chat`、`responses`、`anthropic`、`systemone`、`google`。使用不支持的原生协议的模型会从模型列表中隐藏，除非配置了覆盖值。
 
 成本、弃用信息及模型限制来自官方 [OpenCode 元数据地址](https://models.opencode.ai/api.json)，每 24 小时刷新一次。能力目录中的限制优先；元数据中的 `limit.context`、`limit.input` 和 `limit.output` 仅补充缺失字段，通过 `/v1/models` 的 `context_window` / `context_length`、`max_input`、`max_output` 暴露。每个 HTTP 客户端的拉取超时为 30 秒，刷新失败时保留已有数据。升级后继续兼容原有 `.models.dev.json` 缓存文件名，无需删除缓存。
 

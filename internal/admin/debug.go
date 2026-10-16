@@ -62,7 +62,8 @@ func (a *Server) handleDebugInference(w http.ResponseWriter, r *http.Request) {
 		writeAdminError(w, http.StatusBadRequest, "invalid_request", err.Error())
 		return
 	}
-	if !protocol.Valid(input.Protocol) {
+	// Gemini is an upstream protocol only; the gateway has no Gemini endpoint.
+	if !protocol.Valid(input.Protocol) || input.Protocol == protocol.Google {
 		writeAdminError(w, http.StatusBadRequest, "invalid_protocol", "protocol must be chat, responses, or anthropic")
 		return
 	}

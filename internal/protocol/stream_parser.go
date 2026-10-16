@@ -17,6 +17,8 @@ type bridgeStreamParser struct {
 	toolOrder         []string
 	responseArgs      map[string]bool
 	responseReasoning map[string]bool
+	// googleCallIDs holds the function call IDs a Gemini stream already used.
+	googleCallIDs map[string]bool
 }
 
 func (parser *bridgeStreamParser) Parse(eventName, data string) ([]bridgeStreamEvent, error) {
@@ -37,6 +39,8 @@ func (parser *bridgeStreamParser) Parse(eventName, data string) ([]bridgeStreamE
 		return parser.parseAnthropicEvent(eventName, value)
 	case Responses:
 		return parser.parseResponses(eventName, value), nil
+	case Google:
+		return parser.parseGoogle(value), nil
 	default:
 		return nil, fmt.Errorf("unsupported stream protocol %q", parser.protocol)
 	}

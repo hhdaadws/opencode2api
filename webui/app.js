@@ -1044,7 +1044,7 @@ function renderModelQuotas() {
     appendCell(row, model.id, "mono");
     appendCell(
       row,
-      { chat: "Chat Completions", responses: "Responses", anthropic: "Messages" }[model.protocol] ||
+      { chat: "Chat Completions", responses: "Responses", anthropic: "Messages", google: "Gemini" }[model.protocol] ||
         model.protocol,
     );
     for (const [id] of windows) {

@@ -17,14 +17,17 @@ import (
 
 const (
 	CapabilitiesURL = "https://models.opencode.ai/api.json"
-	ZenDocsURL      = "https://raw.githubusercontent.com/anomalyco/opencode/dev/packages/web/src/content/docs/zen.mdx"
-	GoDocsURL       = "https://raw.githubusercontent.com/anomalyco/opencode/dev/packages/web/src/content/docs/go.mdx"
+	ZenDocsURL      = "https://raw.githubusercontent.com/anomalyco/opencode/dev/services/www/src/docs/content/console/models.mdx"
+	GoDocsURL       = "https://raw.githubusercontent.com/anomalyco/opencode/dev/services/www/src/docs/content/console/go.mdx"
 	// LegacyZenBase is the console origin that still serves the anonymous
 	// models listing after chat traffic moved to the inference backend.
 	LegacyZenBase = "https://opencode.ai/zen"
 )
 
-var protocolDocEndpointPattern = regexp.MustCompile("\\|[^|]+\\|\\s*`?([^|`\\s]+)`?\\s*\\|\\s*`[^`]+/v1/(chat/completions|responses|messages|systemone)`")
+// protocolDocEndpointPattern reads one row of an endpoint table: the model ID
+// and either a message endpoint (/v1/chat/completions, ...) or a Gemini model
+// endpoint (/v1beta/models/<id>), whose path names the model instead.
+var protocolDocEndpointPattern = regexp.MustCompile("\\|[^|]+\\|\\s*`?([^|`\\s]+)`?\\s*\\|\\s*`[^`]+/(?:v1/(chat/completions|responses|messages|systemone)|v1(?:beta)?/models/[^`/]+)`")
 
 type Capabilities struct {
 	Protocols   map[config.Tier]map[string]wire.Protocol
@@ -47,6 +50,10 @@ type capabilityModel struct {
 	ToolCall         bool                       `json:"tool_call"`
 	StructuredOutput bool                       `json:"structured_output"`
 	Modalities       *capabilityModelModalities `json:"modalities"`
+	// Temperature and ReasoningOptions are decoded loosely: the catalog covers
+	// every provider, and one unexpected shape must not fail the whole refresh.
+	Temperature      any `json:"temperature"`
+	ReasoningOptions any `json:"reasoning_options"`
 }
 
 type capabilityModelModalities struct {
@@ -73,6 +80,11 @@ type Metadata struct {
 	StructuredOutput bool     `json:"structured_output,omitempty"`
 	InputModalities  []string `json:"input_modalities,omitempty"`
 	OutputModalities []string `json:"output_modalities,omitempty"`
+	// ReasoningEfforts are the effort levels the catalog offers for the model,
+	// and Temperature is false for a model that does not accept one. Gemini
+	// requests are fitted to both before they are sent.
+	ReasoningEfforts []string `json:"reasoning_effort_values,omitempty"`
+	Temperature      *bool    `json:"temperature,omitempty"`
 	// Cost is filled from models.dev at read time, in USD per million tokens.
 	Cost *Cost `json:"cost,omitempty"`
 }
@@ -95,6 +107,22 @@ func (m *capabilityModel) metadata() Metadata {
 	if m.Modalities != nil {
 		md.InputModalities = m.Modalities.Input
 		md.OutputModalities = m.Modalities.Output
+	}
+	if temperature, ok := m.Temperature.(bool); ok {
+		md.Temperature = &temperature
+	}
+	options, _ := m.ReasoningOptions.([]any)
+	for _, raw := range options {
+		option, _ := raw.(map[string]any)
+		if option["type"] != "effort" {
+			continue
+		}
+		values, _ := option["values"].([]any)
+		for _, value := range values {
+			if effort, ok := value.(string); ok && effort != "" {
+				md.ReasoningEfforts = append(md.ReasoningEfforts, effort)
+			}
+		}
 	}
 	if m.Limit != nil {
 		md.ContextWindow = m.Limit.Context
@@ -212,6 +240,10 @@ func FetchProtocolDocs(ctx context.Context, client *http.Client, endpoint string
 		if len(match) != 3 {
 			continue
 		}
+		// A row without a message endpoint matched the Gemini model path.
+		if match[2] == "" {
+			match[2] = "models"
+		}
 		modelID := strings.TrimSpace(match[1])
 		if modelID == "" || strings.ContainsAny(modelID, " `|") {
 			continue
@@ -226,6 +258,8 @@ func FetchProtocolDocs(ctx context.Context, client *http.Client, endpoint string
 			protocol = wire.Anthropic
 		case "systemone":
 			protocol = wire.SystemOne
+		case "models":
+			protocol = wire.Google
 		}
 		if protocol != "" {
 			result[modelID] = protocol
@@ -257,6 +291,10 @@ func protocolForSDK(npm string) (wire.Protocol, bool) {
 		return wire.Responses, true
 	case strings.Contains(value, "openai-compatible"):
 		return wire.Chat, true
+	case value == "@ai-sdk/google" || strings.HasSuffix(value, "/google"):
+		// The Gemini API. Vertex (@ai-sdk/google-vertex) addresses projects and
+		// locations instead and is not matched.
+		return wire.Google, true
 	default:
 		return "", false
 	}

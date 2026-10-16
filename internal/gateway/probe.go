@@ -150,7 +150,7 @@ func (g *Gateway) probeAttempt(parent context.Context, client *http.Client, base
 	ctx, cancel := context.WithTimeout(parent, 60*time.Second)
 	defer cancel()
 	ids.Request = identity.RandomID("req", 16)
-	req, err := newUpstreamRequest(ctx, baseURL, protocol, b, ids, key)
+	req, err := newUpstreamRequest(ctx, baseURL, protocol, model, b, ids, key)
 	if err != nil {
 		return probeResult{reason: "request_creation_error"}
 	}
@@ -194,10 +194,13 @@ func (g *Gateway) probeAttempt(parent context.Context, client *http.Client, base
 				}
 			default:
 				field := "choices"
-				if protocol == wire.Anthropic {
+				switch protocol {
+				case wire.Anthropic:
 					field = "content"
-				} else if protocol == wire.Responses {
+				case wire.Responses:
 					field = "output"
+				case wire.Google:
+					field = "candidates"
 				}
 				if _, ok := document[field].([]any); !ok {
 					err = fmt.Errorf("invalid response schema")
